@@ -1,0 +1,37 @@
+{
+  "name": "tenant-provisioning-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-tenant SaaS signup, Stripe payment setup and per-tenant AWS provisioning",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p apps/public-app && tsc --noEmit -p apps/tenant",
+    "deploy": "cross-env STAGE=$npm_config_stage APPLICATION=$npm_config_application node -r ./scripts/loadEnv scripts/deploy.js",
+    "offline": "cross-env STAGE=$npm_config_stage APPLICATION=$npm_config_application OFFLINE=true node -r ./scripts/loadEnv scripts/deploy.js",
+    "deploy-tenant": "cross-env STAGE=$npm_config_stage APPLICATION=$npm_config_application TENANT_ID=$npm_config_tenant node -r ./scripts/loadEnv scripts/deploy-tenant.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tochiOz/tenant-provisioning-service.git"
+  },
+  "keywords": [
+    "multi-tenant",
+    "serverless",
+    "aws",
+    "stripe",
+    "provisioning"
+  ],
+  "author": "Tochukwu Ozurumba (Tueloper)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tochiOz/tenant-provisioning-service/issues"
+  },
+  "homepage": "https://github.com/tochiOz/tenant-provisioning-service#readme",
+  "dependencies": {
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.7",
+    "shelljs": "^0.8.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

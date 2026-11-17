@@ -1,0 +1,27 @@
+# Runs inside each tenant's CodeBuild project (created by CodeBuildService).
+# STAGE, TENANT_ID, AWS_REGION and ACCOUNT_ID are set on the project.
+#
+# Deploys the tenant's stacks, then tells the platform the tenant is ready
+# via the post-deployment queue (consumed by the afterProvisioning function).
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - npm install -g serverless@4
+      - npm ci
+
+  build:
+    commands:
+      - node scripts/deploy-tenant.js
+
+  post_build:
+    commands:
+      - |
+        QUEUE_URL="https://sqs.${AWS_REGION}.amazonaws.com/${ACCOUNT_ID}/${STAGE}-shared-resources-post-deployment-queue"
+        aws sqs send-message \
+          --queue-url "$QUEUE_URL" \
+          --message-body "{\"tenantId\":\"${TENANT_ID}\",\"stage\":\"${STAGE}\",\"status\":\"success\",\"deploymentTime\":\"$(date -Iseconds)\"}" \
+          --region "$AWS_REGION"

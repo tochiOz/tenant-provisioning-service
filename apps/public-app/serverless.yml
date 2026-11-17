@@ -1,0 +1,247 @@
+# Public API: tenant signup, email verification, Stripe payment setup, and the
+# queue consumers that provision each tenant and send the welcome email.
+
+org: tueloper
+app: tenant-provisioning-service
+service: public-app
+frameworkVersion: "4"
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${env:STAGE, 'dev'}
+  region: ${env:AWS_REGION, 'ca-central-1'}
+  memorySize: 256
+  timeout: 30
+  versionFunctions: false
+  stackName: "${self:provider.stage}-${self:service}"
+  deploymentBucket:
+    name: s3-${self:provider.stage}-${self:provider.region}.${env:ACCOUNT_ID}.deploys.${self:service}
+  environment:
+    STAGE: ${self:provider.stage}
+    ACCOUNT_ID: ${env:ACCOUNT_ID}
+    JWT_SECRET: ${env:JWT_SECRET}
+    SES_SOURCE_EMAIL: ${env:SES_SOURCE_EMAIL}
+    STRIPE_SECRET_KEY: ${env:STRIPE_SECRET_KEY}
+    STRIPE_WEBHOOK_SECRET: ${env:STRIPE_WEBHOOK_SECRET}
+    TENANT_BASE_DOMAIN: ${env:TENANT_BASE_DOMAIN}
+    BACKEND_REPO_URL: ${env:BACKEND_REPO_URL}
+    GITHUB_BRANCH_NAME: ${env:GITHUB_BRANCH_NAME, 'main'}
+    GITHUB_CONNECTION_ARN: ${env:GITHUB_CONNECTION_ARN}
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+  stackTags:
+    SERVICE: "${self:service}"
+  iam:
+    role:
+      statements:
+        # Tenant and setup-wizard tables (shared-resources stack)
+        - Effect: Allow
+          Action:
+            - dynamodb:DescribeTable
+            - dynamodb:Query
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+          Resource:
+            - "arn:aws:dynamodb:${self:provider.region}:${env:ACCOUNT_ID}:table/${self:provider.stage}-shared-resources-*"
+
+        # Verification and welcome emails
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+          Resource: "arn:aws:ses:${self:provider.region}:${env:ACCOUNT_ID}:*"
+
+        # Tenant provisioning queue
+        - Effect: Allow
+          Action:
+            - sqs:GetQueueUrl
+            - sqs:SendMessage
+          Resource: "arn:aws:sqs:${self:provider.region}:${env:ACCOUNT_ID}:${self:provider.stage}-shared-resources-tenant-queue"
+
+        # Per-tenant CodeBuild projects and pipelines
+        - Effect: Allow
+          Action:
+            - codebuild:ListProjects
+            - codepipeline:ListPipelines
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - codebuild:CreateProject
+            - codebuild:UpdateProject
+          Resource: "arn:aws:codebuild:${self:provider.region}:${env:ACCOUNT_ID}:project/${self:provider.stage}-tenant-*"
+        - Effect: Allow
+          Action:
+            - codepipeline:CreatePipeline
+            - codepipeline:UpdatePipeline
+            - codepipeline:StartPipelineExecution
+          Resource: "arn:aws:codepipeline:${self:provider.region}:${env:ACCOUNT_ID}:${self:provider.stage}-tenant-*"
+        - Effect: Allow
+          Action:
+            - iam:PassRole
+          Resource:
+            - "arn:aws:iam::${env:ACCOUNT_ID}:role/${self:provider.stage}-codebuild-service-role"
+            - "arn:aws:iam::${env:ACCOUNT_ID}:role/${self:provider.stage}-codepipeline-service-role"
+        - Effect: Allow
+          Action:
+            - codestar-connections:PassConnection
+            - codestar-connections:UseConnection
+          Resource: ${env:GITHUB_CONNECTION_ARN}
+
+plugins:
+  - serverless-domain-manager
+  - serverless-offline
+
+custom:
+  customDomain:
+    domainName: ${env:AWS_CUSTOM_DOMAIN}
+    basePath: ${self:provider.stackName}
+    stage: ${self:provider.stage}
+    certificateName: ${env:AWS_CUSTOM_DOMAIN}
+    createRoute53Record: true
+    certificateRegion: us-east-1
+    endpointType: regional
+    hostedZoneId: ${env:HOSTED_ZONE_ID, null}
+  serverless-offline:
+    httpPort: 1001
+    lambdaPort: 1003
+
+functions:
+  createTenant:
+    handler: src/handlers/tenant/addTenant.handler
+    description: Register a new tenant and email a verification code
+    events:
+      - http:
+          path: /tenant
+          method: post
+          cors: true
+
+  verifyTenant:
+    handler: src/handlers/tenant/verifyTenant.handler
+    description: Verify the tenant's email and start Stripe payment setup
+    events:
+      - http:
+          path: /tenant/verify
+          method: post
+          cors: true
+
+  resendVerificationCode:
+    handler: src/handlers/tenant/resendVerificationCode.handler
+    description: Email the tenant a new verification code
+    events:
+      - http:
+          path: /tenant/resendCode
+          method: get
+          cors: true
+
+  confirmPayment:
+    handler: src/handlers/tenant/confirmPayment.handler
+    description: Confirm the Stripe SetupIntent and queue the tenant for provisioning
+    events:
+      - http:
+          path: /tenant/confirmpayment
+          method: post
+          cors: true
+
+  paymentWebhook:
+    handler: src/handlers/stripe/paymentWebhook.handler
+    description: Stripe webhook (setup_intent.succeeded)
+    events:
+      - http:
+          path: /verify/payment-webhook
+          method: post
+          cors: true
+
+  processTenantProvisioning:
+    handler: src/handlers/tenant/processTenantProvisioning.handler
+    description: Create or update the tenant's pipeline and start it
+    memorySize: 512
+    timeout: 120
+    events:
+      - sqs:
+          arn: "arn:aws:sqs:${self:provider.region}:${env:ACCOUNT_ID}:${self:provider.stage}-shared-resources-tenant-queue"
+          batchSize: 10
+          maximumBatchingWindow: 5
+          maximumConcurrency: 250
+          functionResponseType: ReportBatchItemFailures
+
+  afterProvisioning:
+    handler: src/handlers/tenant/afterProvisioning.handler
+    description: Start the tenant's setup wizard and send the welcome email
+    memorySize: 128
+    events:
+      - sqs:
+          arn: "arn:aws:sqs:${self:provider.region}:${env:ACCOUNT_ID}:${self:provider.stage}-shared-resources-post-deployment-queue"
+          batchSize: 1
+          maximumBatchingWindow: 5
+          maximumConcurrency: 10
+          functionResponseType: ReportBatchItemFailures
+
+resources:
+  Resources:
+    # Role used by each tenant's CodeBuild project to deploy that tenant's stacks
+    CodeBuildServiceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:provider.stage}-codebuild-service-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codebuild.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CodeBuildServicePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # Deploying the tenant's Serverless stacks
+                - Effect: Allow
+                  Action:
+                    - logs:*
+                    - s3:*
+                    - cloudformation:*
+                    - lambda:*
+                    - apigateway:*
+                    - dynamodb:*
+                    - iam:*
+                    - route53:*
+                    - acm:*
+                    - cloudfront:*
+                    - ssm:GetParameter
+                    - sts:GetCallerIdentity
+                  Resource: "*"
+                # Tell the platform the tenant was deployed
+                - Effect: Allow
+                  Action:
+                    - sqs:GetQueueUrl
+                    - sqs:SendMessage
+                  Resource: "arn:aws:sqs:${self:provider.region}:${env:ACCOUNT_ID}:${self:provider.stage}-shared-resources-post-deployment-queue"
+
+    # Role used by each tenant's CodePipeline
+    CodePipelineServiceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:provider.stage}-codepipeline-service-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codepipeline.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CodePipelineServicePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - codebuild:BatchGetBuilds
+                    - codebuild:StartBuild
+                    - codestar-connections:UseConnection
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:GetBucketVersioning
+                    - s3:PutObject
+                  Resource: "*"
