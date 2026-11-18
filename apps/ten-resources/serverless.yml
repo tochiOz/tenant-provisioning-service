@@ -1,9 +1,3 @@
-# Per-tenant data stack.
-#
-# Deployed once per tenant (before the tenant stack) by the tenant's build.
-# Holds that tenant's own tables, so each tenant's data is isolated.
-# This is a minimal example with a single users table.
-
 org: tueloper
 app: tenant-provisioning-service
 service: ten-resources
